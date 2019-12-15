@@ -15,14 +15,34 @@ import wx.adv
 import yaml
 import datetime
 
+import subprocess
+
+cmd = 'your command'
+res = subprocess.call(cmd, shell=True, stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+
+from shutil import copy as copyfile
 from threading import Thread, Timer
 from PIL import ImageGrab
 from pynput import keyboard
 from git import Repo
 from pyperclip import copy
+from ctypes import windll, create_unicode_buffer, c_void_p, c_uint, c_wchar_p
 
-current_key_pressed = []  # 当前按下的按键
-github_username = ''  # 填入你的github的用户名
+kernel32 = windll.kernel32
+GlobalLock = kernel32.GlobalLock
+GlobalLock.argtypes = [c_void_p]
+GlobalLock.restype = c_void_p
+GlobalUnlock = kernel32.GlobalUnlock
+GlobalUnlock.argtypes = [c_void_p]
+user32 = windll.user32
+GetClipboardData = user32.GetClipboardData
+GetClipboardData.restype = c_void_p
+DragQueryFile = windll.shell32.DragQueryFileW
+DragQueryFile.argtypes = [c_void_p, c_uint, c_wchar_p, c_uint]
+CF_HDROP = 15
+
+current_key_pressed = []
+github_username = ''
 repository_name = ''
 keycode = {}
 hotkey = ''
@@ -30,6 +50,24 @@ repo = Repo(os.getcwd())
 git = repo.git
 listener = None
 text = ''
+
+
+def get_clipboard_files():
+    file_list = []
+    if user32.OpenClipboard(None):
+        hGlobal = user32.GetClipboardData(CF_HDROP)
+        if hGlobal:
+            hDrop = GlobalLock(hGlobal)
+            if hDrop:
+                count = DragQueryFile(hDrop, 0xFFFFFFFF, None, 0)
+                for i in range(count):
+                    length = DragQueryFile(hDrop, i, None, 0)
+                    buffer = create_unicode_buffer(length)
+                    DragQueryFile(hDrop, i, buffer, length + 1)
+                    file_list.append(buffer.value)
+                GlobalUnlock(hGlobal)
+        user32.CloseClipboard()
+    return file_list
 
 
 def write_keycode():
@@ -56,10 +94,9 @@ def init():
             repository_name = config['repository_name']
             hotkey = config['hotkey'].lower().split('+')
             language = config['language']
-            with open('language/'+language + '.yml', 'r', encoding='utf-8') as f:
+            with open('language/' + language + '.yml', 'r', encoding='utf-8') as f:
                 cont = f.read()
                 config = yaml.load(cont, Loader=yaml.BaseLoader)
-                global text
                 text = [config['Info'],
                         config['Exit'],
                         config['Upload Clipboard To GitHub'],
@@ -71,31 +108,10 @@ def init():
             pass
 
 
-def savepic(window):
-    try:
-        im = ImageGrab.grabclipboard()
-        filename = '{0:%Y%m%d%H%M%S%f}'.format(datetime.datetime.now())
-        im.save(r'images/image_' + str(filename) + '.png')
-        ThreadUpload('images\\image_' + str(filename) + '.png', window)
-        copy(
-            'https://raw.githubusercontent.com/' + github_username + '/' + repository_name + '/master/images/image_' + str(
-                filename) + '.png')
-    except:
-        wx.CallAfter(window.Failed)
-
-
-def is_pressed():
-    for key in hotkey:
-        if key not in current_key_pressed:
-            return False
-    return True
-
-
 class ThreadKey(Thread):
     def __init__(self, window):
         Thread.__init__(self)
         self.window = window
-        self.start()  # start the thread
 
     def run(self):
         global listener
@@ -118,9 +134,37 @@ class ThreadKey(Thread):
             if key.vk not in current_key_pressed:
                 current_key_pressed.append(key.vk)
 
-        if is_pressed():
+        if self.is_pressed():
             wx.CallAfter(self.window.Uploading)
-            savepic(self.window)
+            self.get_pic_from_clipboard(self.window)
+
+    @staticmethod
+    def get_pic_from_clipboard(window):
+        try:
+            im = ImageGrab.grabclipboard()
+            filename = '{0:%Y%m%d%H%M%S%f}'.format(datetime.datetime.now())
+            if im:
+                im.save(r'images/image_' + str(filename) + '.png')
+            else:
+                image = get_clipboard_files()[0]
+                copyfile(image, r'images/image_' + str(filename) + os.path.splitext(image)[1])
+
+            ThreadUpload('images/image_' + str(filename) + '.png', window)
+            copy(
+                '![](https://raw.githubusercontent.com/' + github_username + '/' + repository_name + '/master/images/image_' + str(
+                    filename) + '.png)')
+
+        except AttributeError:
+            wx.CallAfter(window.Failed)
+        except IndexError:
+            wx.CallAfter(window.Failed)
+
+    @staticmethod
+    def is_pressed():
+        for key in hotkey:
+            if key not in current_key_pressed:
+                return False
+        return True
 
 
 class ThreadUpload(Thread):
@@ -183,7 +227,8 @@ class MyTaskBarIcon(wx.adv.TaskBarIcon):
         self.frame4.Center()
         self.frame4.Show(False)
 
-        ThreadKey(self)
+        threadkey = ThreadKey(self)
+        threadkey.start()
 
     # “关于”选项的事件处理器
     def onAbout(self, event):
@@ -197,7 +242,7 @@ class MyTaskBarIcon(wx.adv.TaskBarIcon):
 
     # “显示页面”选项的事件处理器
     def onShowWeb(self, event):
-        savepic()
+        ThreadKey.get_pic_from_clipboard(self)
 
     # 创建菜单选项
     def CreatePopupMenu(self):
